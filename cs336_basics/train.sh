@@ -5,7 +5,7 @@
 # Basic Training Example (Small Model)
 # ==============================================================================
 uv run python train.py \
-    --data_path ../data/owt_train.txt \
+    --data_path ../data/TinyStoriesV2-GPT4-train.txt \
     --experiment_name "small_model" \
     --d_model 256 \
     --num_layers 4 \
