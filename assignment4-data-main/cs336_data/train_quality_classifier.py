@@ -8,6 +8,7 @@ from typing import List, Tuple
 import fasttext
 from fastwarc.warc import ArchiveIterator, WarcRecordType
 from tqdm import tqdm
+import time
 
 from utils import (
     extract_text, identify_language, mask_emails, 
@@ -75,9 +76,10 @@ class QualityClassifierTrainer:
     #     # Run wget in the base directory
     #     subprocess.run(cmd, cwd=self.base_dir, check=True)
     #     print(f"WARC file created at {self.warc_path}")
-    def scrape_urls_in_batches(self, batch_size: int = 5000, timeout: int = 5) -> None:
+    def scrape_urls_in_batches(self, batch_size: int = 5000, timeout: int = 1) -> None:
         """
         Scrape URLs in batches to avoid file descriptor limits.
+        Shows real-time progress during scraping.
         """
         print("Scraping URLs in batches...")
         
@@ -87,9 +89,14 @@ class QualityClassifierTrainer:
         
         total_urls = len(all_urls)
         print(f"Total URLs to scrape: {total_urls}")
+        print(f"Timeout per URL: {timeout} seconds")
+        print(f"Batch size: {batch_size} URLs")
         
         # Process in batches
         num_batches = (total_urls + batch_size - 1) // batch_size
+        
+        overall_start_time = time.time()
+        successful_batches = 0
         
         for i in range(0, total_urls, batch_size):
             batch_num = i // batch_size + 1
@@ -98,6 +105,7 @@ class QualityClassifierTrainer:
             print(f"\n{'='*60}")
             print(f"Processing batch {batch_num}/{num_batches}")
             print(f"URLs in this batch: {len(batch_urls)}")
+            print(f"Progress: {i}/{total_urls} URLs processed so far")
             print(f"{'='*60}")
             
             # Create temporary file for this batch
@@ -117,39 +125,74 @@ class QualityClassifierTrainer:
                 '-O', '/dev/null',
                 '--warc-max-size=1G',
                 '--tries=2',
-                '--waitretry=1'
+                '--waitretry=1',
+                '--progress=bar:force',  # Show progress bar
+                '--show-progress'  # Display download progress
             ]
+            
+            batch_start_time = time.time()
             
             try:
                 print(f"Running wget for batch {batch_num}...")
+                print(f"Started at: {time.strftime('%H:%M:%S')}")
+                
+                # Run wget without capturing output so we can see real-time progress
                 result = subprocess.run(
                     cmd, 
                     cwd=self.base_dir, 
-                    check=False,  # Don't raise exception on non-zero exit
-                    capture_output=True,
-                    text=True
+                    check=False  # Don't raise exception on non-zero exit
                 )
                 
-                if result.returncode == 0:
-                    print(f"✓ Batch {batch_num} completed successfully")
+                batch_duration = time.time() - batch_start_time
+                
+                # Check if WARC file was created
+                warc_file = self.base_dir / f"{batch_warc_stem}.gz"
+                warc_exists = warc_file.exists()
+                
+                if warc_exists:
+                    warc_size_mb = warc_file.stat().st_size / (1024 * 1024)
+                    print(f"\n✓ Batch {batch_num} completed")
+                    print(f"  - Duration: {batch_duration:.1f} seconds")
+                    print(f"  - WARC file size: {warc_size_mb:.2f} MB")
+                    print(f"  - Exit code: {result.returncode}")
+                    successful_batches += 1
                 else:
-                    print(f"⚠ Batch {batch_num} completed with some errors (exit code: {result.returncode})")
-                    print("This is normal - some URLs may be unreachable")
+                    print(f"\n⚠ Batch {batch_num} completed but no WARC file created")
+                    print(f"  - Duration: {batch_duration:.1f} seconds")
+                    print(f"  - Exit code: {result.returncode}")
+                
+                # Estimate time remaining
+                if batch_num < num_batches:
+                    avg_time_per_batch = (time.time() - overall_start_time) / batch_num
+                    remaining_batches = num_batches - batch_num
+                    estimated_remaining = avg_time_per_batch * remaining_batches
+                    print(f"  - Estimated time remaining: {estimated_remaining/60:.1f} minutes")
                     
             except Exception as e:
-                print(f"⚠ Warning: Batch {batch_num} encountered an error: {e}")
+                print(f"\n⚠ Warning: Batch {batch_num} encountered an error: {e}")
                 print("Continuing with next batch...")
             finally:
                 # Clean up temporary batch file
                 if batch_file.exists():
                     batch_file.unlink()
-                    print(f"Cleaned up temporary file: {batch_file.name}")
+                    print(f"  - Cleaned up temporary file: {batch_file.name}")
+        
+        # Summary statistics
+        total_duration = time.time() - overall_start_time
         
         # List all created WARC files
         warc_files = list(self.base_dir.glob("positive_urls_batch_*.warc.gz"))
+        total_warc_size_mb = sum(f.stat().st_size for f in warc_files) / (1024 * 1024)
+        
         print(f"\n{'='*60}")
-        print(f"✓ Scraping complete!")
-        print(f"Created {len(warc_files)} WARC files in {self.base_dir}")
+        print(f"✓ SCRAPING COMPLETE!")
+        print(f"{'='*60}")
+        print(f"Total time: {total_duration/60:.1f} minutes")
+        print(f"URLs processed: {total_urls}")
+        print(f"Successful batches: {successful_batches}/{num_batches}")
+        print(f"WARC files created: {len(warc_files)}")
+        print(f"Total WARC size: {total_warc_size_mb:.2f} MB")
+        print(f"Average speed: {total_urls/(total_duration/60):.1f} URLs/minute")
         print(f"{'='*60}\n")
     
     def filter_and_clean_text(self, text: str) -> Tuple[str, bool]:
