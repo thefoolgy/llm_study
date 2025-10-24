@@ -55,26 +55,102 @@ class QualityClassifierTrainer:
         
         print(f"Sampled {len(sample)} URLs to {self.sampled_urls_path}")
     
-    def scrape_urls(self, timeout: int = 5) -> None:
-        """
-        Scrape URLs using wget to create WARC file.
-        """
-        print("Scraping URLs with wget...")
+    # def scrape_urls(self, timeout: int = 5) -> None:
+    #     """
+    #     Scrape URLs using wget to create WARC file.
+    #     """
+    #     print("Scraping URLs with wget...")
         
-        cmd = [
-            'wget',
-            f'--timeout={timeout}',
-            '-i', str(self.sampled_urls_path),
-            f'--warc-file={self.warc_path.stem}',
-            '-O', '/dev/null',
-            '--warc-max-size=1G',
-            '--tries=2',
-            '--waitretry=1'
-        ]
+    #     cmd = [
+    #         'wget',
+    #         f'--timeout={timeout}',
+    #         '-i', str(self.sampled_urls_path),
+    #         f'--warc-file={self.warc_path.stem}',
+    #         '-O', '/dev/null',
+    #         '--warc-max-size=1G',
+    #         '--tries=2',
+    #         '--waitretry=1'
+    #     ]
         
-        # Run wget in the base directory
-        subprocess.run(cmd, cwd=self.base_dir, check=True)
-        print(f"WARC file created at {self.warc_path}")
+    #     # Run wget in the base directory
+    #     subprocess.run(cmd, cwd=self.base_dir, check=True)
+    #     print(f"WARC file created at {self.warc_path}")
+    def scrape_urls_in_batches(self, batch_size: int = 5000, timeout: int = 5) -> None:
+        """
+        Scrape URLs in batches to avoid file descriptor limits.
+        """
+        print("Scraping URLs in batches...")
+        
+        # Read all URLs
+        with open(self.sampled_urls_path, 'r') as f:
+            all_urls = [line.strip() for line in f if line.strip()]
+        
+        total_urls = len(all_urls)
+        print(f"Total URLs to scrape: {total_urls}")
+        
+        # Process in batches
+        num_batches = (total_urls + batch_size - 1) // batch_size
+        
+        for i in range(0, total_urls, batch_size):
+            batch_num = i // batch_size + 1
+            batch_urls = all_urls[i:i + batch_size]
+            
+            print(f"\n{'='*60}")
+            print(f"Processing batch {batch_num}/{num_batches}")
+            print(f"URLs in this batch: {len(batch_urls)}")
+            print(f"{'='*60}")
+            
+            # Create temporary file for this batch
+            batch_file = self.base_dir / f"batch_{batch_num}_urls.txt"
+            with open(batch_file, 'w') as f:
+                for url in batch_urls:
+                    f.write(url + '\n')
+            
+            # WARC file for this batch
+            batch_warc_stem = f"positive_urls_batch_{batch_num}.warc"
+            
+            cmd = [
+                'wget',
+                f'--timeout={timeout}',
+                '-i', str(batch_file),
+                f'--warc-file={batch_warc_stem}',
+                '-O', '/dev/null',
+                '--warc-max-size=1G',
+                '--tries=2',
+                '--waitretry=1'
+            ]
+            
+            try:
+                print(f"Running wget for batch {batch_num}...")
+                result = subprocess.run(
+                    cmd, 
+                    cwd=self.base_dir, 
+                    check=False,  # Don't raise exception on non-zero exit
+                    capture_output=True,
+                    text=True
+                )
+                
+                if result.returncode == 0:
+                    print(f"✓ Batch {batch_num} completed successfully")
+                else:
+                    print(f"⚠ Batch {batch_num} completed with some errors (exit code: {result.returncode})")
+                    print("This is normal - some URLs may be unreachable")
+                    
+            except Exception as e:
+                print(f"⚠ Warning: Batch {batch_num} encountered an error: {e}")
+                print("Continuing with next batch...")
+            finally:
+                # Clean up temporary batch file
+                if batch_file.exists():
+                    batch_file.unlink()
+                    print(f"Cleaned up temporary file: {batch_file.name}")
+        
+        # List all created WARC files
+        warc_files = list(self.base_dir.glob("positive_urls_batch_*.warc.gz"))
+        print(f"\n{'='*60}")
+        print(f"✓ Scraping complete!")
+        print(f"Created {len(warc_files)} WARC files in {self.base_dir}")
+        print(f"{'='*60}\n")
     
     def filter_and_clean_text(self, text: str) -> Tuple[str, bool]:
         """
@@ -112,30 +188,81 @@ class QualityClassifierTrainer:
     
     def extract_positive_examples(self, max_examples: int = 40000) -> List[str]:
         """
-        Extract and filter positive examples from WARC file.
+        Extract and filter positive examples from all WARC files.
         """
-        print("Extracting positive examples from WARC...")
+        print("Extracting positive examples from WARC files...")
         positive_examples = []
         
-        with gzip.open(self.warc_path, 'rb') as stream:
-            for record in tqdm(ArchiveIterator(stream), desc="Processing WARC"):
-                if record.record_type != WarcRecordType.response:
-                    continue
-                
-                # Extract HTML content
-                html_bytes = record.reader.read()
-                text = extract_text(html_bytes)
-                
-                # Apply filters
-                cleaned_text, is_valid = self.filter_and_clean_text(text)
-                
-                if is_valid and cleaned_text:
-                    positive_examples.append(cleaned_text)
-                    
-                    if len(positive_examples) >= max_examples:
-                        break
+        # Find all WARC files (both single file and batched files)
+        warc_files = list(self.base_dir.glob("positive_urls*.warc.gz"))
         
-        print(f"Extracted {len(positive_examples)} positive examples")
+        if not warc_files:
+            print("❌ No WARC files found!")
+            print("Make sure scraping completed successfully.")
+            return positive_examples
+        
+        print(f"Found {len(warc_files)} WARC file(s) to process")
+        
+        for warc_idx, warc_file in enumerate(warc_files, 1):
+            print(f"\n{'='*60}")
+            print(f"Processing WARC file {warc_idx}/{len(warc_files)}: {warc_file.name}")
+            print(f"{'='*60}")
+            
+            try:
+                with gzip.open(warc_file, 'rb') as stream:
+                    records_processed = 0
+                    records_valid = 0
+                    
+                    for record in tqdm(
+                        ArchiveIterator(stream), 
+                        desc=f"Processing {warc_file.name}",
+                        unit="records"
+                    ):
+                        if record.record_type != WarcRecordType.response:
+                            continue
+                        
+                        records_processed += 1
+                        
+                        try:
+                            # Extract HTML content
+                            html_bytes = record.reader.read()
+                            text = extract_text(html_bytes)
+                            
+                            # Apply filters
+                            cleaned_text, is_valid = self.filter_and_clean_text(text)
+                            
+                            if is_valid and cleaned_text:
+                                positive_examples.append(cleaned_text)
+                                records_valid += 1
+                                
+                                if len(positive_examples) >= max_examples:
+                                    print(f"\n✓ Reached target of {max_examples} examples. Stopping.")
+                                    print(f"Final stats for {warc_file.name}:")
+                                    print(f"  - Records processed: {records_processed}")
+                                    print(f"  - Valid examples: {records_valid}")
+                                    print(f"  - Success rate: {records_valid/records_processed*100:.1f}%")
+                                    return positive_examples
+                        
+                        except Exception as e:
+                            # Skip problematic records
+                            continue
+                    
+                    print(f"\nStats for {warc_file.name}:")
+                    print(f"  - Records processed: {records_processed}")
+                    print(f"  - Valid examples: {records_valid}")
+                    if records_processed > 0:
+                        print(f"  - Success rate: {records_valid/records_processed*100:.1f}%")
+            
+            except Exception as e:
+                print(f"⚠ Error processing {warc_file.name}: {e}")
+                print("Continuing with next WARC file...")
+                continue
+        
+        print(f"\n{'='*60}")
+        print(f"✓ Extraction complete!")
+        print(f"Total positive examples extracted: {len(positive_examples)}")
+        print(f"{'='*60}\n")
+        
         return positive_examples
     
     def create_negative_examples(self, num_examples: int = 40000) -> List[str]:
@@ -235,9 +362,10 @@ class QualityClassifierTrainer:
         return model
     
     def train_pipeline(self, sample_size: int = 50000, 
-                      max_positive: int = 40000,
-                      max_negative: int = 40000,
-                      skip_scraping: bool = False) -> None:
+                  max_positive: int = 40000,
+                  max_negative: int = 40000,
+                  skip_scraping: bool = False,
+                  batch_size: int = 5000) -> None:  # Add batch_size parameter
         """
         Run the complete training pipeline.
         
@@ -246,6 +374,7 @@ class QualityClassifierTrainer:
             max_positive: Maximum number of positive examples to extract
             max_negative: Maximum number of negative examples to create
             skip_scraping: If True, skip URL scraping (use existing WARC)
+            batch_size: Number of URLs to process in each batch (default: 5000)
         """
         # Step 1: Subsample URLs
         if not self.sampled_urls_path.exists():
@@ -253,15 +382,22 @@ class QualityClassifierTrainer:
         else:
             print(f"Using existing sampled URLs at {self.sampled_urls_path}")
         
-        # Step 2: Scrape URLs (optional - can skip if WARC exists)
+        # Step 2: Scrape URLs in batches (optional - can skip if WARC exists)
         if not skip_scraping:
-            if not self.warc_path.exists():
-                self.scrape_urls()
+            # Check if any WARC files exist
+            existing_warcs = list(self.base_dir.glob("positive_urls*.warc.gz"))
+            if not existing_warcs:
+                self.scrape_urls_in_batches(batch_size=batch_size)  # Use batched scraping
             else:
-                print(f"Using existing WARC file at {self.warc_path}")
+                print(f"Using existing WARC file(s) at {self.base_dir}")
         
         # Step 3: Extract positive examples
         positive_examples = self.extract_positive_examples(max_positive)
+        
+        if len(positive_examples) == 0:
+            print("❌ Error: No positive examples extracted!")
+            print("Check if WARC files exist and contain valid data.")
+            return
         
         # Step 4: Create negative examples
         negative_examples = self.create_negative_examples(max_negative)
@@ -272,10 +408,16 @@ class QualityClassifierTrainer:
         # Step 6: Train classifier
         self.train_classifier()
         
-        print("\n✓ Training complete!")
+        print("\n" + "="*60)
+        print("✓ Training complete!")
         print(f"Model location: {self.model_path}")
+        print("="*60)
 
 
+def main():
+    """
+    Main function to train the quality classifier.
+    """
 def main():
     """
     Main function to train the quality classifier.
@@ -284,13 +426,13 @@ def main():
     
     trainer = QualityClassifierTrainer(base_dir)
     
-    # Run the training pipeline
-    # Set skip_scraping=True if you already have a WARC file
+    # Run the training pipeline with batch processing
     trainer.train_pipeline(
         sample_size=50000,
         max_positive=40000,
         max_negative=40000,
-        skip_scraping=False  # Set to True if WARC already exists
+        skip_scraping=False,
+        batch_size=5000  # Process 5000 URLs at a time
     )
 
 

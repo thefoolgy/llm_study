@@ -36,7 +36,7 @@ def run_classify_toxic_speech(text: str) -> tuple[Any, float]:
 
 
 def run_classify_quality(text: str) -> tuple[Any, float]:
-    raise NotImplementedError
+    return classify_quality(text)
 
 
 def run_gopher_quality_filter(text: str) -> bool:

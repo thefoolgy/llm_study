@@ -100,3 +100,12 @@ def gopher_quality_filter(text: str) -> bool:
         if alphabetic_ratio < 0.80:
             return False  
     return True
+
+def classify_quality(text: str) -> tuple[Any, float]:
+    MODEL_PATH = '/Users/thefoolgy/Desktop/assignment1-basics-main/assignment4-data-main/cs336_data/quality_classifier.bin'
+    _MODEL = fasttext.load_model(MODEL_PATH)
+    text = text.replace('\n', ' ').strip()
+    labels, probs = _MODEL.predict(text, k=1)
+    lang = labels[0].replace('__label__', '')
+    conf = float(probs[0])
+    return (lang, conf)
